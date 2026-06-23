@@ -44,6 +44,149 @@ const userSchema = new mongoose.Schema(
 
 const User = mongoose.model('User', userSchema);
 
+// Schema definition for pending delivery boys waiting for admin approval
+const pendingUserSchema = new mongoose.Schema(
+  {
+    phone: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    name: { type: String, required: true },
+    email: { type: String },
+    firebaseUid: { type: String },
+    aadharUrl: { type: String },
+    aadharNumber: { type: String },
+    rcUrl: { type: String },
+    rcNumber: { type: String },
+    licenseUrl: { type: String },
+    licenseNumber: { type: String },
+    accountNumber: { type: String },
+    ifscCode: { type: String },
+    isActive: { type: Boolean, default: false },
+  },
+  { 
+    timestamps: true, 
+    collection: 'Deliveryboynewadd' // Forces collection name
+  }
+);
+
+const PendingUser = mongoose.model('PendingUser', pendingUserSchema);
+
+// Signup Endpoint - saves to Deliveryboynewadd for admin review
+app.post('/api/deliveryboy/signup', async (req, res) => {
+  try {
+    const {
+      name,
+      email,
+      password,
+      phone,
+      firebaseUid,
+      aadharUrl,
+      aadharNumber,
+      rcUrl,
+      rcNumber,
+      licenseUrl,
+      licenseNumber,
+      accountNumber,
+      ifscCode
+    } = req.body;
+
+    // Check if phone number is already registered in deliveryboyusers
+    const existingRegisteredUser = await User.findOne({ phone });
+    if (existingRegisteredUser) {
+      return res.status(400).json({ message: 'Phone number is already registered.' });
+    }
+
+    // Check if phone number is already pending in Deliveryboynewadd
+    const existingPendingUser = await PendingUser.findOne({ phone });
+    if (existingPendingUser) {
+      return res.status(400).json({ message: 'A registration request with this phone number is already pending admin approval.' });
+    }
+
+    // Check email if provided
+    if (email) {
+      const existingEmail = await User.findOne({ email });
+      if (existingEmail) {
+        return res.status(400).json({ message: 'Email address is already registered.' });
+      }
+      const existingPendingEmail = await PendingUser.findOne({ email });
+      if (existingPendingEmail) {
+        return res.status(400).json({ message: 'A registration request with this email is already pending admin approval.' });
+      }
+    }
+
+    // Create a new pending user document
+    const pendingUser = new PendingUser({
+      name,
+      email,
+      password,
+      phone,
+      firebaseUid,
+      aadharUrl,
+      aadharNumber,
+      rcUrl,
+      rcNumber,
+      licenseUrl,
+      licenseNumber,
+      accountNumber,
+      ifscCode,
+      isActive: false // Keep it false initially
+    });
+
+    await pendingUser.save();
+
+    return res.status(201).json({
+      message: 'Registration request submitted successfully. Please wait for admin approval.'
+    });
+  } catch (error) {
+    console.error('Signup error:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Check if phone number exists in deliveryboyusers collection
+app.post('/api/deliveryboy/check-phone', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone) {
+      return res.status(400).json({ success: false, message: 'Phone number is required' });
+    }
+
+    const user = await User.findOne({ phone });
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'Phone number not found.' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Phone number verified.' });
+  } catch (error) {
+    console.error('Check phone error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+});
+
+// Update/Reset password for a delivery boy
+app.post('/api/deliveryboy/reset-password', async (req, res) => {
+  try {
+    const { phone, newPassword } = req.body;
+    if (!phone || !newPassword) {
+      return res.status(400).json({ success: false, message: 'Phone number and new password are required' });
+    }
+
+    const user = await User.findOneAndUpdate(
+      { phone },
+      { password: newPassword },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ success: false, message: 'User not found.' });
+    }
+
+    return res.status(200).json({ success: true, message: 'Password updated successfully.' });
+  } catch (error) {
+    console.error('Reset password error:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error', error: error.message });
+  }
+});
+
 // Login Endpoint
 app.post('/api/login', async (req, res) => {
   try {
