@@ -70,6 +70,21 @@ const pendingUserSchema = new mongoose.Schema(
 
 const PendingUser = mongoose.model('PendingUser', pendingUserSchema);
 
+// Helper to build a phone query matching both with and without the +91 prefix
+const getPhoneQuery = (phone) => {
+  if (!phone) return {};
+  const cleanPhone = phone.trim();
+  const phoneWithPrefix = cleanPhone.startsWith('+91') ? cleanPhone : `+91${cleanPhone}`;
+  const phoneWithoutPrefix = cleanPhone.startsWith('+91') ? cleanPhone.slice(3) : cleanPhone;
+  return {
+    $or: [
+      { phone: cleanPhone },
+      { phone: phoneWithPrefix },
+      { phone: phoneWithoutPrefix }
+    ]
+  };
+};
+
 // Signup Endpoint - saves to Deliveryboynewadd for admin review
 app.post('/api/deliveryboy/signup', async (req, res) => {
   try {
@@ -90,13 +105,13 @@ app.post('/api/deliveryboy/signup', async (req, res) => {
     } = req.body;
 
     // Check if phone number is already registered in deliveryboyusers
-    const existingRegisteredUser = await User.findOne({ phone });
+    const existingRegisteredUser = await User.findOne(getPhoneQuery(phone));
     if (existingRegisteredUser) {
       return res.status(400).json({ message: 'Phone number is already registered.' });
     }
 
     // Check if phone number is already pending in Deliveryboynewadd
-    const existingPendingUser = await PendingUser.findOne({ phone });
+    const existingPendingUser = await PendingUser.findOne(getPhoneQuery(phone));
     if (existingPendingUser) {
       return res.status(400).json({ message: 'A registration request with this phone number is already pending admin approval.' });
     }
@@ -150,7 +165,7 @@ app.post('/api/deliveryboy/check-phone', async (req, res) => {
       return res.status(400).json({ success: false, message: 'Phone number is required' });
     }
 
-    const user = await User.findOne({ phone });
+    const user = await User.findOne(getPhoneQuery(phone));
     if (!user) {
       return res.status(404).json({ success: false, message: 'Phone number not found.' });
     }
@@ -171,7 +186,7 @@ app.post('/api/deliveryboy/reset-password', async (req, res) => {
     }
 
     const user = await User.findOneAndUpdate(
-      { phone },
+      getPhoneQuery(phone),
       { password: newPassword },
       { new: true }
     );
@@ -197,7 +212,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     // Find the user by phone number
-    const user = await User.findOne({ phone });
+    const user = await User.findOne(getPhoneQuery(phone));
     if (!user) {
       return res.status(404).json({ message: 'no account found', errorType: 'NO_ACCOUNT' });
     }
