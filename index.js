@@ -3,6 +3,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const admin = require('firebase-admin');
+const { getMessaging } = require('firebase-admin/messaging');
 const fs = require('fs');
 const path = require('path');
 
@@ -10,18 +11,21 @@ const path = require('path');
 try {
   const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
   if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    const privateKey = process.env.FIREBASE_PRIVATE_KEY
+      .replace(/^"|"$/g, '')
+      .replace(/\\n/g, '\n');
     admin.initializeApp({
-      credential: admin.credential.cert({
+      credential: admin.cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
         clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+        privateKey: privateKey,
       })
     });
     console.log('Firebase Admin SDK initialized successfully via environment variables.');
   } else if (fs.existsSync(serviceAccountPath)) {
     const serviceAccount = require(serviceAccountPath);
     admin.initializeApp({
-      credential: admin.credential.cert(serviceAccount)
+      credential: admin.cert(serviceAccount)
     });
     console.log('Firebase Admin SDK initialized successfully via serviceAccountKey.json.');
   } else {
@@ -353,6 +357,55 @@ app.put('/api/users/:id/push-token', async (req, res) => {
   } catch (error) {
     console.error('Update user push token error:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// FCM Diagnostic and Test Endpoint
+app.get('/api/diagnose-fcm', async (req, res) => {
+  try {
+    const activeUsers = await User.find({
+      isActive: true,
+      pushToken: { $exists: true, $ne: '' }
+    });
+
+    const initializationStatus = admin.getApps().length > 0 ? 'Initialized' : 'Not Initialized';
+    
+    let sendResult = null;
+    if (activeUsers.length > 0 && admin.getApps().length > 0) {
+      const tokens = activeUsers.map(user => user.pushToken);
+      const testMessage = {
+        notification: {
+          title: 'Test Notification',
+          body: 'This is a test notification from the backend diagnostic tool.',
+        },
+        android: {
+          priority: 'high',
+          notification: {
+            sound: 'default',
+          }
+        },
+        tokens: tokens,
+      };
+      try {
+        sendResult = await getMessaging().sendEachForMulticast(testMessage);
+      } catch (err) {
+        sendResult = { error: err.message };
+      }
+    }
+
+    return res.status(200).json({
+      firebaseAdminStatus: initializationStatus,
+      firebaseConfiguredEnv: {
+        projectId: !!process.env.FIREBASE_PROJECT_ID,
+        clientEmail: !!process.env.FIREBASE_CLIENT_EMAIL,
+        privateKeyExists: !!process.env.FIREBASE_PRIVATE_KEY
+      },
+      activeUsersCount: activeUsers.length,
+      activeUsers: activeUsers.map(u => ({ name: u.name, phone: u.phone, hasToken: !!u.pushToken })),
+      sendResult: sendResult
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message });
   }
 });
 
@@ -736,7 +789,7 @@ async function sendFCMToActiveDeliveryBoys(order) {
     };
 
     // Send using FCM admin SDK (sendEachForMulticast)
-    const response = await admin.messaging().sendEachForMulticast(message);
+    const response = await getMessaging().sendEachForMulticast(message);
     console.log(`Successfully sent ${response.successCount} messages; ${response.failureCount} failed.`);
     
     // Optionally clean up invalid tokens if they failed
@@ -758,6 +811,8 @@ async function sendFCMToActiveDeliveryBoys(order) {
   }
 }
 
+let isPollingActive = false;
+
 // Set up MongoDB listener for acceptedorders collection
 function setupOrderListener() {
   const db = mongoose.connection.db;
@@ -777,12 +832,21 @@ function setupOrderListener() {
     });
 
     changeStream.on('error', (err) => {
-      console.error('Change stream error, falling back to polling:', err);
-      setupPollingFallback();
+      console.error('Change stream error:', err.message || err);
+      if (changeStream) {
+        changeStream.close().catch(() => {});
+      }
+      if (!isPollingActive) {
+        isPollingActive = true;
+        setupPollingFallback();
+      }
     });
   } catch (error) {
-    console.error('Failed to start change stream, falling back to polling:', error);
-    setupPollingFallback();
+    console.error('Failed to start change stream:', error.message || error);
+    if (!isPollingActive) {
+      isPollingActive = true;
+      setupPollingFallback();
+    }
   }
 }
 
