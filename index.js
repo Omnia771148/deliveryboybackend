@@ -2,6 +2,35 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
+const admin = require('firebase-admin');
+const fs = require('fs');
+const path = require('path');
+
+// Initialize Firebase Admin SDK
+try {
+  const serviceAccountPath = path.join(__dirname, 'serviceAccountKey.json');
+  if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL && process.env.FIREBASE_PRIVATE_KEY) {
+    admin.initializeApp({
+      credential: admin.credential.cert({
+        projectId: process.env.FIREBASE_PROJECT_ID,
+        clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
+        privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      })
+    });
+    console.log('Firebase Admin SDK initialized successfully via environment variables.');
+  } else if (fs.existsSync(serviceAccountPath)) {
+    const serviceAccount = require(serviceAccountPath);
+    admin.initializeApp({
+      credential: admin.credential.cert(serviceAccount)
+    });
+    console.log('Firebase Admin SDK initialized successfully via serviceAccountKey.json.');
+  } else {
+    console.warn('Firebase credentials not found (neither in environment variables nor serviceAccountKey.json). Push notifications will not work.');
+  }
+} catch (error) {
+  console.error('Error initializing Firebase Admin SDK:', error);
+}
+
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -12,7 +41,10 @@ app.use(express.json());
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGODB_URI)
-  .then(() => console.log('Successfully connected to MongoDB.'))
+  .then(() => {
+    console.log('Successfully connected to MongoDB.');
+    setupOrderListener();
+  })
   .catch((err) => {
     console.error('MongoDB connection error:', err);
     process.exit(1);
@@ -35,6 +67,7 @@ const userSchema = new mongoose.Schema(
     accountNumber: { type: String },
     ifscCode: { type: String },
     isActive: { type: Boolean, default: false }, // Syncs active/inactive state
+    pushToken: { type: String }, // For FCM push notifications
   },
   { 
     timestamps: true, // Handles createdAt and updatedAt automatically
@@ -294,6 +327,31 @@ app.put('/api/users/:id/status', async (req, res) => {
     });
   } catch (error) {
     console.error('Update user status error:', error);
+    return res.status(500).json({ message: 'Internal server error', error: error.message });
+  }
+});
+
+// Update User Push Token Endpoint
+app.put('/api/users/:id/push-token', async (req, res) => {
+  try {
+    const { pushToken } = req.body;
+
+    const user = await User.findByIdAndUpdate(
+      req.params.id,
+      { pushToken },
+      { new: true }
+    );
+
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    return res.status(200).json({
+      message: 'Push token updated successfully',
+      pushToken: user.pushToken,
+    });
+  } catch (error) {
+    console.error('Update user push token error:', error);
     return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 });
@@ -645,6 +703,127 @@ app.get('/api/deliveryboy/:id/reviews', async (req, res) => {
     return res.status(500).json({ message: 'Internal server error', error: error.message });
   }
 });
+
+// Function to send FCM notification to all active delivery partners
+async function sendFCMToActiveDeliveryBoys(order) {
+  try {
+    // Find all active delivery boy users who have registered a push token
+    const activeUsers = await User.find({
+      isActive: true,
+      pushToken: { $exists: true, $ne: '' }
+    });
+
+    if (activeUsers.length === 0) {
+      console.log('No active delivery partners with registered push tokens found.');
+      return;
+    }
+
+    const tokens = activeUsers.map(user => user.pushToken);
+    console.log(`Sending new order notification to ${tokens.length} active delivery partners.`);
+
+    const message = {
+      notification: {
+        title: 'New Order Available!',
+        body: `New order from ${order.restaurantName || 'Restaurant'} is available. Delivery Fee: ₹${order.deliveryCharge || 0}`,
+      },
+      android: {
+        priority: 'high',
+        notification: {
+          sound: 'default',
+        }
+      },
+      tokens: tokens,
+    };
+
+    // Send using FCM admin SDK (sendEachForMulticast)
+    const response = await admin.messaging().sendEachForMulticast(message);
+    console.log(`Successfully sent ${response.successCount} messages; ${response.failureCount} failed.`);
+    
+    // Optionally clean up invalid tokens if they failed
+    if (response.failureCount > 0) {
+      response.responses.forEach((resp, idx) => {
+        if (!resp.success) {
+          const error = resp.error;
+          if (error && (error.code === 'messaging/registration-token-not-registered' || error.code === 'messaging/invalid-registration-token')) {
+            const badToken = tokens[idx];
+            console.log(`Cleaning up invalid token: ${badToken}`);
+            User.updateOne({ pushToken: badToken }, { $unset: { pushToken: 1 } })
+              .catch(err => console.error('Failed to clean up invalid token:', err));
+          }
+        }
+      });
+    }
+  } catch (error) {
+    console.error('Error sending FCM notifications:', error);
+  }
+}
+
+// Set up MongoDB listener for acceptedorders collection
+function setupOrderListener() {
+  const db = mongoose.connection.db;
+  const collection = db.collection('acceptedorders');
+
+  console.log('Setting up MongoDB Order Change Stream listener...');
+
+  let changeStream;
+  try {
+    changeStream = collection.watch([
+      { $match: { operationType: 'insert' } }
+    ]);
+
+    changeStream.on('change', async (change) => {
+      console.log('New order detected via Change Stream:', change.fullDocument.orderId);
+      await sendFCMToActiveDeliveryBoys(change.fullDocument);
+    });
+
+    changeStream.on('error', (err) => {
+      console.error('Change stream error, falling back to polling:', err);
+      setupPollingFallback();
+    });
+  } catch (error) {
+    console.error('Failed to start change stream, falling back to polling:', error);
+    setupPollingFallback();
+  }
+}
+
+// Fallback polling for MongoDB instances without replica set configured
+function setupPollingFallback() {
+  console.log('Setting up database polling fallback (every 10 seconds)...');
+  const db = mongoose.connection.db;
+  const collection = db.collection('acceptedorders');
+
+  let knownOrderIds = new Set();
+  let isFirstLoad = true;
+
+  const poll = async () => {
+    try {
+      const orders = await collection.find({}).toArray();
+      const currentOrderIds = new Set(orders.map(o => o.orderId));
+
+      if (isFirstLoad) {
+        knownOrderIds = currentOrderIds;
+        isFirstLoad = false;
+        console.log(`Polling initialized with ${knownOrderIds.size} existing orders.`);
+        return;
+      }
+
+      // Check for new orders
+      for (const order of orders) {
+        if (!knownOrderIds.has(order.orderId)) {
+          console.log('New order detected via polling:', order.orderId);
+          await sendFCMToActiveDeliveryBoys(order);
+        }
+      }
+
+      knownOrderIds = currentOrderIds;
+    } catch (error) {
+      console.error('Polling error:', error);
+    }
+  };
+
+  // Run poll every 10 seconds
+  setInterval(poll, 10000);
+}
 
 // Start Server
 app.listen(PORT, () => {
