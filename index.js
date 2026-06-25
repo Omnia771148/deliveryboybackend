@@ -372,17 +372,26 @@ app.get('/api/diagnose-fcm', async (req, res) => {
     
     let sendResult = null;
     if (activeUsers.length > 0 && admin.getApps().length > 0) {
-      const tokens = activeUsers.map(user => user.pushToken);
+      const tokens = [...new Set(activeUsers.map(user => user.pushToken))];
       const testMessage = {
         notification: {
           title: 'Test Notification',
           body: 'This is a test notification from the backend diagnostic tool.',
+          sound: 'ordernotification.wav',
         },
         android: {
           priority: 'high',
           notification: {
-            sound: 'default',
+            sound: 'ordernotification',
+            channelId: 'order_notifications',
           }
+        },
+        apns: {
+          payload: {
+            aps: {
+              sound: 'ordernotification.wav',
+            },
+          },
         },
         tokens: tokens,
       };
@@ -771,19 +780,28 @@ async function sendFCMToActiveDeliveryBoys(order) {
       return;
     }
 
-    const tokens = activeUsers.map(user => user.pushToken);
+    const tokens = [...new Set(activeUsers.map(user => user.pushToken))];
     console.log(`Sending new order notification to ${tokens.length} active delivery partners.`);
 
     const message = {
       notification: {
         title: 'New Order Available!',
         body: `New order from ${order.restaurantName || 'Restaurant'} is available. Delivery Fee: ₹${order.deliveryCharge || 0}`,
+        sound: 'ordernotification.wav',
       },
       android: {
         priority: 'high',
         notification: {
-          sound: 'default',
+          sound: 'ordernotification',
+          channelId: 'order_notifications',
         }
+      },
+      apns: {
+        payload: {
+          aps: {
+            sound: 'ordernotification.wav',
+          },
+        },
       },
       tokens: tokens,
     };
