@@ -377,7 +377,6 @@ app.get('/api/diagnose-fcm', async (req, res) => {
         notification: {
           title: 'Test Notification',
           body: 'This is a test notification from the backend diagnostic tool.',
-          sound: 'ordernotification.wav',
         },
         android: {
           priority: 'high',
@@ -787,7 +786,6 @@ async function sendFCMToActiveDeliveryBoys(order) {
       notification: {
         title: 'New Order Available!',
         body: `New order from ${order.restaurantName || 'Restaurant'} is available. Delivery Fee: ₹${order.deliveryCharge || 0}`,
-        sound: 'ordernotification.wav',
       },
       android: {
         priority: 'high',
