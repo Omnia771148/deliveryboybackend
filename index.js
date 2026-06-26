@@ -741,6 +741,33 @@ app.post('/api/acceptedbydeliveries/:id/complete', async (req, res) => {
     // Delete from orderstatuses collection
     await db.collection('orderstatuses').deleteOne({ orderId: order.orderId });
 
+    // Update pending payments for the delivery boy
+    try {
+      const deliveryBoyId = order.deliveryBoyId;
+      const deliveryBoyName = order.deliveryBoyName;
+      const deliveryBoyPhone = order.deliveryBoyPhone;
+      const deliveryCharge = Number(order.deliveryCharge || 0);
+
+      if (deliveryBoyId) {
+        await db.collection('pendingpaymentsofdeliveryboy').updateOne(
+          { userid: deliveryBoyId },
+          {
+            $set: {
+              userid: deliveryBoyId,
+              name: deliveryBoyName,
+              phonenumber: deliveryBoyPhone
+            },
+            $inc: {
+              deliverycharges: deliveryCharge
+            }
+          },
+          { upsert: true }
+        );
+      }
+    } catch (paymentErr) {
+      console.error('Error updating pendingpaymentsofdeliveryboy:', paymentErr);
+    }
+
     return res.status(200).json({ message: 'Order completed successfully', orderId: order.orderId });
   } catch (error) {
     console.error('Complete order error:', error);
