@@ -488,9 +488,23 @@ app.get('/api/deliveryboy/:id/orders', async (req, res) => {
 // Fetch all active accepted orders
 app.get('/api/acceptedorders', async (req, res) => {
   try {
+    const { deliveryBoyId } = req.query;
     const db = mongoose.connection.db;
+
+    let query = {};
+    if (deliveryBoyId) {
+      query = {
+        $or: [
+          { deliveryBoyId: { $exists: false } },
+          { deliveryBoyId: null },
+          { deliveryBoyId: "" },
+          { deliveryBoyId: deliveryBoyId }
+        ]
+      };
+    }
+
     const orders = await db.collection('acceptedorders')
-      .find({})
+      .find(query)
       .sort({ orderDate: -1 })
       .toArray();
 
@@ -604,6 +618,19 @@ app.post('/api/acceptedorders/:id/accept', async (req, res) => {
 
     // Insert into acceptedbydeliveries
     await db.collection('acceptedbydeliveries').insertOne(acceptedOrderDoc);
+
+    // Update the order in acceptedorders with the delivery boy details
+    await db.collection('acceptedorders').updateOne(
+      query,
+      {
+        $set: {
+          deliveryBoyId,
+          deliveryBoyName,
+          deliveryBoyPhone,
+          updatedAt: new Date()
+        }
+      }
+    );
 
     // Update status in orderstatuses collection
     await db.collection('orderstatuses').updateOne(
